@@ -1,12 +1,13 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Header } from './components/Header';
+import { Header, type NavTab } from './components/Header';
 import { SafeToSpendBar } from './components/SafeToSpendBar';
 import { SummaryCards } from './components/SummaryCards';
+import { OverviewPulse } from './components/OverviewPulse';
 import { ChartsView } from './components/ChartsView';
 import { BudgetProgress } from './components/BudgetProgress';
 import { TransactionList } from './components/TransactionList';
+import { SyncSettingsView } from './components/SyncSettingsView';
 import { AddTransactionModal } from './components/AddTransactionModal';
-import { ImportExportModal } from './components/ImportExportModal';
 import {
   loadBudgets,
   loadSettings,
@@ -24,15 +25,26 @@ import { parseGoogleSheetValues } from './utils/csvParser';
 import type { CategoryBudget, Transaction, UserSettings } from './types/finance';
 import { Smartphone, CheckCircle, AlertCircle } from 'lucide-react';
 
+const VALID_TABS: NavTab[] = ['overview', 'budgets', 'analytics', 'transactions', 'settings'];
+
+function getInitialTabFromHash(): NavTab {
+  if (typeof window === 'undefined') return 'overview';
+  const hash = window.location.hash.replace('#', '').toLowerCase() as NavTab;
+  return VALID_TABS.includes(hash) ? hash : 'overview';
+}
+
 export function App() {
+  const [activeTab, setActiveTab] = useState<NavTab>(getInitialTabFromHash);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [budgets, setBudgets] = useState<CategoryBudget[]>([]);
   const [settings, setSettings] = useState<UserSettings>(loadSettings());
   const [selectedMonth, setSelectedMonth] = useState<string>('ALL');
 
+  // Cross-view drilldown filter (when clicking a category in Overview, Budgets, or Analytics)
+  const [drilldownCategory, setDrilldownCategory] = useState<string | null>(null);
+
   // Modals & Quick Sync state
   const [isAddOpen, setIsAddOpen] = useState(false);
-  const [isSyncOpen, setIsSyncOpen] = useState(false);
   const [isQuickSyncing, setIsQuickSyncing] = useState(false);
   const [syncBanner, setSyncBanner] = useState<{
     type: 'success' | 'error';
@@ -42,7 +54,7 @@ export function App() {
   // PWA Install prompt event
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
 
-  // Initial Load
+  // Initial Load & Hash Listener
   useEffect(() => {
     const loadedTx = loadTransactions();
     const loadedB = loadBudgets();
@@ -66,9 +78,30 @@ export function App() {
       setDeferredPrompt(e);
     };
 
+    const handleHashChange = () => {
+      setActiveTab(getInitialTabFromHash());
+    };
+
     window.addEventListener('beforeinstallprompt', handleBeforeInstall);
-    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
+    window.addEventListener('hashchange', handleHashChange);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
+      window.removeEventListener('hashchange', handleHashChange);
+    };
   }, []);
+
+  const handleTabChange = (tab: NavTab) => {
+    setActiveTab(tab);
+    if (typeof window !== 'undefined') {
+      window.history.replaceState(null, '', `#${tab}`);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  const handleDrilldownCategory = (category: string) => {
+    setDrilldownCategory(category);
+    handleTabChange('transactions');
+  };
 
   const handleInstallApp = async () => {
     if (!deferredPrompt) return;
@@ -93,6 +126,17 @@ export function App() {
     if (selectedMonth === 'ALL') return transactions;
     return transactions.filter((t) => t.date.startsWith(selectedMonth));
   }, [transactions, selectedMonth]);
+
+  // Count how many categories are over budget in the selected timeframe (for nav badge)
+  const overBudgetCount = useMemo(() => {
+    const spentByCat: Record<string, number> = {};
+    filteredTransactions.forEach((t) => {
+      if (t.debit > 0 && t.subCategory !== 'Internal Transfer') {
+        spentByCat[t.masterCategory] = (spentByCat[t.masterCategory] || 0) + t.debit;
+      }
+    });
+    return budgets.filter((b) => (spentByCat[b.category] || 0) > b.limit).length;
+  }, [filteredTransactions, budgets]);
 
   const handleAddTransaction = (newTx: Transaction) => {
     const updated = [newTx, ...transactions];
@@ -131,13 +175,13 @@ export function App() {
 
   const handleQuickSync = async () => {
     if (!settings.googleClientId || !settings.googleSheetUrl) {
-      setIsSyncOpen(true);
+      handleTabChange('settings');
       return;
     }
 
     const spreadsheetId = extractSpreadsheetId(settings.googleSheetUrl);
     if (!spreadsheetId) {
-      setIsSyncOpen(true);
+      handleTabChange('settings');
       return;
     }
 
@@ -183,17 +227,20 @@ export function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
       <Header
+        activeTab={activeTab}
+        onTabChange={handleTabChange}
         selectedMonth={selectedMonth}
         onMonthChange={setSelectedMonth}
         availableMonths={availableMonths}
         onOpenAddModal={() => setIsAddOpen(true)}
-        onOpenSyncModal={() => setIsSyncOpen(true)}
         onQuickSync={handleQuickSync}
         isQuickSyncing={isQuickSyncing}
         settings={settings}
+        transactionCount={filteredTransactions.length}
+        overBudgetCount={overBudgetCount}
       />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
+      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 pb-24 md:pb-8 space-y-6">
         {/* Quick Sync Notification Banner */}
         {syncBanner && (
           <div
@@ -243,65 +290,92 @@ export function App() {
           </div>
         )}
 
-        {/* 0. Safe-to-Spend & Monthly Runway Bar (Hero Decision Component) */}
-        <SafeToSpendBar
-          transactions={filteredTransactions}
-          allTransactions={transactions}
-          budgets={budgets}
-          settings={settings}
-          selectedMonth={selectedMonth}
-        />
+        {/* VIEW 1: OVERVIEW (Pulse Decision Dashboard) */}
+        {activeTab === 'overview' && (
+          <div className="space-y-6">
+            {/* Hero Safe-to-Spend & Monthly Runway Bar */}
+            <SafeToSpendBar
+              transactions={filteredTransactions}
+              allTransactions={transactions}
+              budgets={budgets}
+              settings={settings}
+              selectedMonth={selectedMonth}
+            />
 
-        {/* 1. Summary KPI Cards (Income, Outflow, Net Cashflow, Owner Split) */}
-        <SummaryCards
-          transactions={filteredTransactions}
-          budgets={budgets}
-          settings={settings}
-        />
+            {/* Summary KPI Cards (Income, Outflow, Net Cashflow, Owner Split) */}
+            <SummaryCards
+              transactions={filteredTransactions}
+              budgets={budgets}
+              settings={settings}
+            />
 
-        {/* 2. Visual Analytics (Master Categories & Sub-Category Drilldown) */}
-        <ChartsView
-          transactions={filteredTransactions}
-          budgets={budgets}
-          settings={settings}
-        />
+            {/* Quick Previews: Category Watchlist & Recent Transactions */}
+            <OverviewPulse
+              transactions={filteredTransactions}
+              budgets={budgets}
+              settings={settings}
+              onNavigate={handleTabChange}
+              onDrilldownCategory={handleDrilldownCategory}
+            />
+          </div>
+        )}
 
-        {/* 3. Budget Limits vs Spending Progress */}
-        <BudgetProgress
-          budgets={budgets}
-          transactions={filteredTransactions}
-          settings={settings}
-          onUpdateBudget={handleUpdateBudgets}
-        />
+        {/* VIEW 2: BUDGETS (Master Category Targets & Sub-Category Drilldown) */}
+        {activeTab === 'budgets' && (
+          <BudgetProgress
+            budgets={budgets}
+            transactions={filteredTransactions}
+            settings={settings}
+            onUpdateBudget={handleUpdateBudgets}
+            onDrilldownCategory={handleDrilldownCategory}
+          />
+        )}
 
-        {/* 4. Filterable Transaction Register */}
-        <TransactionList
-          transactions={filteredTransactions}
-          settings={settings}
-          onDeleteTransaction={handleDeleteTransaction}
-        />
+        {/* VIEW 3: ANALYTICS (Visual Breakdown, Accounts & Household Split) */}
+        {activeTab === 'analytics' && (
+          <ChartsView
+            transactions={filteredTransactions}
+            budgets={budgets}
+            settings={settings}
+            onDrilldownCategory={handleDrilldownCategory}
+          />
+        )}
+
+        {/* VIEW 4: TRANSACTIONS (Full Filterable Ledger & Subtotals) */}
+        {activeTab === 'transactions' && (
+          <TransactionList
+            transactions={filteredTransactions}
+            settings={settings}
+            onDeleteTransaction={handleDeleteTransaction}
+            externalCategoryFilter={drilldownCategory}
+            onClearExternalFilter={() => setDrilldownCategory(null)}
+          />
+        )}
+
+        {/* VIEW 5: SYNC & SETTINGS (Google Sheets OAuth 2.0, CSV Backup, Preferences) */}
+        {activeTab === 'settings' && (
+          <SyncSettingsView
+            transactions={transactions}
+            onImportTransactions={handleImportTransactions}
+            settings={settings}
+            onUpdateSettings={handleUpdateSettings}
+          />
+        )}
       </main>
 
-      {/* Footer */}
-      <footer className="border-t border-slate-900 py-6 text-center text-xs text-slate-500">
-        <p>FinanceFlow PWA • CAD ($) • Connexion privée Google Sheets OAuth 2.0 (Lecture seule)</p>
+      {/* Footer (hidden on mobile where bottom nav lives) */}
+      <footer className="hidden md:block border-t border-slate-900 py-5 text-center text-xs text-slate-500">
+        <p>
+          FinanceFlow PWA • CAD ({settings.currency}) • Connexion privée Google Sheets OAuth 2.0 (Lecture seule)
+        </p>
       </footer>
 
-      {/* Modals */}
+      {/* Global Add Transaction Modal */}
       <AddTransactionModal
         isOpen={isAddOpen}
         onClose={() => setIsAddOpen(false)}
         onAddTransaction={handleAddTransaction}
         settings={settings}
-      />
-
-      <ImportExportModal
-        isOpen={isSyncOpen}
-        onClose={() => setIsSyncOpen(false)}
-        transactions={transactions}
-        onImportTransactions={handleImportTransactions}
-        settings={settings}
-        onUpdateSettings={handleUpdateSettings}
       />
     </div>
   );
