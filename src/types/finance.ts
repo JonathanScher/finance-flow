@@ -34,5 +34,8 @@ export interface UserSettings {
   user1Name: string;
   user2Name: string;
   googleSheetUrl?: string;
+  googleClientId?: string;
+  googleSheetTab?: string;
+  lastSyncedAt?: string;
   autoSyncInterval?: number;
 }

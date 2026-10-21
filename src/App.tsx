@@ -14,8 +14,14 @@ import {
   saveSettings,
   saveTransactions,
 } from './utils/storage';
+import {
+  extractSpreadsheetId,
+  fetchPrivateSheetValues,
+  getGoogleAccessToken,
+} from './utils/googleSheetsApi';
+import { parseGoogleSheetValues } from './utils/csvParser';
 import type { CategoryBudget, Transaction, UserSettings } from './types/finance';
-import { Smartphone } from 'lucide-react';
+import { Smartphone, CheckCircle, AlertCircle } from 'lucide-react';
 
 export function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -23,9 +29,14 @@ export function App() {
   const [settings, setSettings] = useState<UserSettings>(loadSettings());
   const [selectedMonth, setSelectedMonth] = useState<string>('ALL');
 
-  // Modals
+  // Modals & Quick Sync state
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isSyncOpen, setIsSyncOpen] = useState(false);
+  const [isQuickSyncing, setIsQuickSyncing] = useState(false);
+  const [syncBanner, setSyncBanner] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
 
   // PWA Install prompt event
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -117,6 +128,57 @@ export function App() {
     saveSettings(newSettings);
   };
 
+  const handleQuickSync = async () => {
+    if (!settings.googleClientId || !settings.googleSheetUrl) {
+      setIsSyncOpen(true);
+      return;
+    }
+
+    const spreadsheetId = extractSpreadsheetId(settings.googleSheetUrl);
+    if (!spreadsheetId) {
+      setIsSyncOpen(true);
+      return;
+    }
+
+    setIsQuickSyncing(true);
+    setSyncBanner(null);
+
+    try {
+      const token = await getGoogleAccessToken(settings.googleClientId);
+      const { values, resolvedTabName } = await fetchPrivateSheetValues(
+        spreadsheetId,
+        settings.googleSheetTab,
+        token
+      );
+      const { transactions: parsed, errors } = parseGoogleSheetValues(values);
+
+      if (parsed.length > 0) {
+        handleImportTransactions(parsed, true);
+        handleUpdateSettings({
+          ...settings,
+          lastSyncedAt: new Date().toISOString(),
+        });
+        setSyncBanner({
+          type: 'success',
+          text: `${parsed.length} transactions synchronisées depuis "${resolvedTabName}"`,
+        });
+        setTimeout(() => setSyncBanner(null), 5000);
+      } else {
+        setSyncBanner({
+          type: 'error',
+          text: errors[0] || 'Aucune transaction trouvée dans la feuille.',
+        });
+      }
+    } catch (err: any) {
+      setSyncBanner({
+        type: 'error',
+        text: err.message || 'Erreur de synchronisation Google Sheets.',
+      });
+    } finally {
+      setIsQuickSyncing(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
       <Header
@@ -125,10 +187,38 @@ export function App() {
         availableMonths={availableMonths}
         onOpenAddModal={() => setIsAddOpen(true)}
         onOpenSyncModal={() => setIsSyncOpen(true)}
+        onQuickSync={handleQuickSync}
+        isQuickSyncing={isQuickSyncing}
         settings={settings}
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
+        {/* Quick Sync Notification Banner */}
+        {syncBanner && (
+          <div
+            className={`p-3.5 rounded-2xl text-xs flex items-center justify-between border ${
+              syncBanner.type === 'success'
+                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {syncBanner.type === 'success' ? (
+                <CheckCircle className="w-4 h-4 flex-shrink-0" />
+              ) : (
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              )}
+              <span className="font-medium">{syncBanner.text}</span>
+            </div>
+            <button
+              onClick={() => setSyncBanner(null)}
+              className="text-slate-400 hover:text-white text-xs ml-4"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         {/* PWA Banner if installable */}
         {deferredPrompt && (
           <div className="bg-gradient-to-r from-indigo-900/60 to-purple-900/60 border border-indigo-500/40 rounded-2xl p-4 flex items-center justify-between shadow-lg">
@@ -184,7 +274,7 @@ export function App() {
 
       {/* Footer */}
       <footer className="border-t border-slate-900 py-6 text-center text-xs text-slate-500">
-        <p>FinanceFlow PWA • CAD ($) • Synced with Google Sheets</p>
+        <p>FinanceFlow PWA • CAD ($) • Connexion privée Google Sheets OAuth 2.0 (Lecture seule)</p>
       </footer>
 
       {/* Modals */}

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Plus, Wallet, RefreshCw } from 'lucide-react';
+import { Plus, Wallet, RefreshCw, Lock } from 'lucide-react';
 import type { UserSettings } from '../types/finance';
 
 interface HeaderProps {
@@ -8,6 +8,8 @@ interface HeaderProps {
   availableMonths: string[];
   onOpenAddModal: () => void;
   onOpenSyncModal: () => void;
+  onQuickSync?: () => void;
+  isQuickSyncing?: boolean;
   settings: UserSettings;
 }
 
@@ -17,7 +19,14 @@ export const Header: React.FC<HeaderProps> = ({
   availableMonths,
   onOpenAddModal,
   onOpenSyncModal,
+  onQuickSync,
+  isQuickSyncing = false,
+  settings,
 }) => {
+  const isPrivateSheetConfigured = Boolean(
+    settings.googleClientId?.trim() && settings.googleSheetUrl?.trim()
+  );
+
   return (
     <header className="sticky top-0 z-30 border-b border-slate-800 bg-slate-900/90 backdrop-blur-md px-4 py-3 sm:px-6">
       <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
@@ -46,7 +55,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Controls: Month Selector & Action Buttons */}
-        <div className="flex items-center gap-2.5 w-full sm:w-auto justify-between sm:justify-end overflow-x-auto pb-1 sm:pb-0">
+        <div className="flex items-center gap-2 w-full sm:w-auto justify-between sm:justify-end overflow-x-auto pb-1 sm:pb-0">
           <select
             value={selectedMonth}
             onChange={(e) => onMonthChange(e.target.value)}
@@ -65,11 +74,23 @@ export const Header: React.FC<HeaderProps> = ({
             })}
           </select>
 
+          {isPrivateSheetConfigured && onQuickSync && (
+            <button
+              onClick={onQuickSync}
+              disabled={isQuickSyncing}
+              title="Synchroniser directement depuis votre feuille Google Sheet privée"
+              className="flex items-center gap-1.5 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 transition disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isQuickSyncing ? 'animate-spin' : ''}`} />
+              <span>{isQuickSyncing ? 'Synchro...' : 'Sync Sheet'}</span>
+            </button>
+          )}
+
           <button
             onClick={onOpenSyncModal}
             className="flex items-center gap-1.5 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
           >
-            <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
+            <Lock className="w-3.5 h-3.5 text-indigo-400" />
             <span>Google Sheets</span>
           </button>
 

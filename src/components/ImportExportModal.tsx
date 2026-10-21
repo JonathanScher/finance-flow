@@ -1,7 +1,33 @@
-import React, { useState } from 'react';
-import { X, Upload, Download, RefreshCw, CheckCircle, AlertCircle, Settings } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import {
+  X,
+  Upload,
+  Download,
+  RefreshCw,
+  CheckCircle,
+  AlertCircle,
+  Settings,
+  Lock,
+  HelpCircle,
+  LogOut,
+  ChevronDown,
+  ChevronUp,
+  ListFilter,
+} from 'lucide-react';
 import type { Transaction, UserSettings } from '../types/finance';
-import { parseGoogleSheetCSV, exportTransactionsToCSV } from '../utils/csvParser';
+import {
+  parseGoogleSheetCSV,
+  parseGoogleSheetValues,
+  exportTransactionsToCSV,
+} from '../utils/csvParser';
+import {
+  getGoogleAccessToken,
+  getCachedAccessToken,
+  disconnectGoogleAccount,
+  extractSpreadsheetId,
+  fetchSpreadsheetTabs,
+  fetchPrivateSheetValues,
+} from '../utils/googleSheetsApi';
 
 interface ImportExportModalProps {
   isOpen: boolean;
@@ -21,15 +47,164 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
   onUpdateSettings,
 }) => {
   const [tab, setTab] = useState<'sheet' | 'csv' | 'settings'>('sheet');
+
+  // Google Private OAuth Settings
+  const [clientId, setClientId] = useState(settings.googleClientId || '');
   const [sheetUrl, setSheetUrl] = useState(settings.googleSheetUrl || '');
+  const [sheetTab, setSheetTab] = useState(settings.googleSheetTab || '');
+  const [availableTabs, setAvailableTabs] = useState<string[]>([]);
+  const [isConnected, setIsConnected] = useState(false);
+  const [showSetupGuide, setShowSetupGuide] = useState(false);
+
+  // Preferences
   const [currency, setCurrency] = useState(settings.currency || '$');
   const [user1, setUser1] = useState(settings.user1Name || 'Me');
   const [user2, setUser2] = useState(settings.user2Name || 'Wife');
 
   const [isLoading, setIsLoading] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [isLoadingTabs, setIsLoadingTabs] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setClientId(settings.googleClientId || '');
+      setSheetUrl(settings.googleSheetUrl || '');
+      setSheetTab(settings.googleSheetTab || '');
+      const token = getCachedAccessToken(settings.googleClientId);
+      setIsConnected(Boolean(token));
+    }
+  }, [isOpen, settings]);
 
   if (!isOpen) return null;
+
+  // Fetch available tabs from private spreadsheet
+  const handleLoadTabs = async () => {
+    const spreadsheetId = extractSpreadsheetId(sheetUrl);
+    if (!spreadsheetId) {
+      setStatusMessage({
+        type: 'error',
+        text: 'Veuillez entrer une URL ou un ID Google Sheets valide.',
+      });
+      return;
+    }
+    if (!clientId.trim()) {
+      setStatusMessage({
+        type: 'error',
+        text: 'Veuillez renseigner votre Google OAuth Client ID.',
+      });
+      return;
+    }
+
+    setIsLoadingTabs(true);
+    setStatusMessage(null);
+
+    try {
+      const token = await getGoogleAccessToken(clientId);
+      setIsConnected(true);
+      const tabs = await fetchSpreadsheetTabs(spreadsheetId, token);
+      setAvailableTabs(tabs);
+      if (tabs.length > 0 && !sheetTab) {
+        setSheetTab(tabs[0]);
+      }
+      setStatusMessage({
+        type: 'success',
+        text: `${tabs.length} onglet(s) détecté(s) dans votre feuille privée !`,
+      });
+    } catch (err: any) {
+      setStatusMessage({
+        type: 'error',
+        text: err.message || 'Impossible de charger les onglets.',
+      });
+    } finally {
+      setIsLoadingTabs(false);
+    }
+  };
+
+  // Handle Private OAuth 2.0 Sync via Google Sheets API v4
+  const handlePrivateGoogleSync = async () => {
+    const spreadsheetId = extractSpreadsheetId(sheetUrl);
+    if (!spreadsheetId) {
+      setStatusMessage({
+        type: 'error',
+        text: 'Veuillez coller l’URL complète (ou l’ID) de votre feuille Google Sheets.',
+      });
+      return;
+    }
+
+    if (!clientId.trim()) {
+      setStatusMessage({
+        type: 'error',
+        text: 'Veuillez entrer votre Google OAuth Client ID (voir le guide ci-dessous).',
+      });
+      setShowSetupGuide(true);
+      return;
+    }
+
+    setIsLoading(true);
+    setStatusMessage(null);
+
+    try {
+      // 1. Authenticate with Google (uses cached token if active, or opens Google Sign-In popup)
+      const accessToken = await getGoogleAccessToken(clientId);
+      setIsConnected(true);
+
+      // 2. Fetch values from Private Google Sheet via Sheets API v4
+      const { values, resolvedTabName } = await fetchPrivateSheetValues(
+        spreadsheetId,
+        sheetTab,
+        accessToken
+      );
+
+      // 3. Parse 2D array into transactions
+      const { transactions: parsed, errors } = parseGoogleSheetValues(values);
+
+      if (parsed.length > 0) {
+        const nowIso = new Date().toISOString();
+        onImportTransactions(parsed, true);
+        if (!sheetTab && resolvedTabName) {
+          setSheetTab(resolvedTabName);
+        }
+        onUpdateSettings({
+          ...settings,
+          googleClientId: clientId.trim(),
+          googleSheetUrl: sheetUrl.trim(),
+          googleSheetTab: sheetTab.trim() || resolvedTabName,
+          lastSyncedAt: nowIso,
+        });
+        setStatusMessage({
+          type: 'success',
+          text: `Synchronisation réussie : ${parsed.length} transactions importées depuis l'onglet "${resolvedTabName}" !`,
+        });
+      } else {
+        setStatusMessage({
+          type: 'error',
+          text:
+            errors.length > 0
+              ? errors[0]
+              : `L'onglet "${resolvedTabName}" a été lu, mais aucune transaction valide n'a été détectée.`,
+        });
+      }
+    } catch (err: any) {
+      setStatusMessage({
+        type: 'error',
+        text: err.message || 'Erreur lors de la synchronisation Google Sheets.',
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleDisconnectGoogle = () => {
+    disconnectGoogleAccount();
+    setIsConnected(false);
+    setStatusMessage({
+      type: 'success',
+      text: 'Session Google déconnectée.',
+    });
+  };
 
   // Handle CSV file upload
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -46,65 +221,16 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
         onImportTransactions(parsed, false);
         setStatusMessage({
           type: 'success',
-          text: `Successfully imported ${parsed.length} transactions!`,
+          text: `${parsed.length} transactions importées avec succès !`,
         });
       } else {
         setStatusMessage({
           type: 'error',
-          text: errors.length > 0 ? errors[0] : 'No valid transactions found in file.',
+          text: errors.length > 0 ? errors[0] : 'Aucune transaction valide trouvée dans le fichier.',
         });
       }
     };
     reader.readAsText(file);
-  };
-
-  // Handle Live Fetch from Published Google Sheet
-  const handleSyncFromSheetUrl = async () => {
-    if (!sheetUrl.trim()) {
-      setStatusMessage({ type: 'error', text: 'Please enter a valid Google Sheets URL.' });
-      return;
-    }
-
-    setIsLoading(true);
-    setStatusMessage(null);
-
-    try {
-      let fetchUrl = sheetUrl.trim();
-      const match = fetchUrl.match(/\/d\/([a-zA-Z0-9-_]+)/);
-      if (match && match[1]) {
-        fetchUrl = `https://docs.google.com/spreadsheets/d/${match[1]}/export?format=csv`;
-      }
-
-      const res = await fetch(fetchUrl);
-      if (!res.ok) {
-        throw new Error(`Failed to fetch sheet (${res.status} ${res.statusText})`);
-      }
-
-      const csvData = await res.text();
-      const { transactions: parsed, errors } = parseGoogleSheetCSV(csvData);
-
-      if (parsed.length > 0) {
-        onImportTransactions(parsed, true);
-        const updatedSettings = { ...settings, googleSheetUrl: sheetUrl };
-        onUpdateSettings(updatedSettings);
-        setStatusMessage({
-          type: 'success',
-          text: `Successfully synced ${parsed.length} transactions from Google Sheets!`,
-        });
-      } else {
-        setStatusMessage({
-          type: 'error',
-          text: errors.length > 0 ? errors[0] : 'Sheet responded, but no rows could be parsed.',
-        });
-      }
-    } catch (err: any) {
-      setStatusMessage({
-        type: 'error',
-        text: `Sync error: ${err.message}. Make sure your sheet is set to 'Anyone with the link can view' or published to the web.`,
-      });
-    } finally {
-      setIsLoading(false);
-    }
   };
 
   // Export to CSV
@@ -128,12 +254,14 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
       user1Name: user1,
       user2Name: user2,
     });
-    setStatusMessage({ type: 'success', text: 'Settings saved successfully!' });
+    setStatusMessage({ type: 'success', text: 'Préférences enregistrées !' });
   };
 
+  const currentOrigin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173';
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-      <div className="bg-slate-900 border border-slate-700 w-full max-w-lg rounded-2xl p-6 shadow-2xl relative">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm overflow-y-auto">
+      <div className="bg-slate-900 border border-slate-700 w-full max-w-xl rounded-2xl p-6 shadow-2xl relative my-8 max-h-[90vh] overflow-y-auto">
         <button
           onClick={onClose}
           className="absolute right-4 top-4 p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
@@ -143,25 +271,38 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
 
         {/* Modal Header */}
         <div className="mb-4">
-          <h3 className="text-lg font-bold text-white">Google Sheets & Data Settings</h3>
-          <p className="text-xs text-slate-400">Import, sync live or configure household parameters</p>
+          <div className="flex items-center gap-2">
+            <h3 className="text-lg font-bold text-white">Connexion Google Sheets Privée</h3>
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+              <Lock className="w-2.5 h-2.5" /> Lecture seule OAuth 2.0
+            </span>
+          </div>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Synchronisez directement votre feuille privée via votre compte Google sans jamais la publier
+          </p>
         </div>
 
         {/* Tab Navigation */}
         <div className="flex border-b border-slate-800 mb-4">
           <button
-            onClick={() => { setTab('sheet'); setStatusMessage(null); }}
+            onClick={() => {
+              setTab('sheet');
+              setStatusMessage(null);
+            }}
             className={`flex items-center gap-1.5 pb-2.5 px-3 text-xs font-semibold border-b-2 transition ${
               tab === 'sheet'
                 ? 'border-indigo-500 text-indigo-400'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span>Live Sheet Sync</span>
+            <Lock className="w-3.5 h-3.5" />
+            <span>Google Login & Sheet</span>
           </button>
           <button
-            onClick={() => { setTab('csv'); setStatusMessage(null); }}
+            onClick={() => {
+              setTab('csv');
+              setStatusMessage(null);
+            }}
             className={`flex items-center gap-1.5 pb-2.5 px-3 text-xs font-semibold border-b-2 transition ${
               tab === 'csv'
                 ? 'border-indigo-500 text-indigo-400'
@@ -172,7 +313,10 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
             <span>CSV Import/Export</span>
           </button>
           <button
-            onClick={() => { setTab('settings'); setStatusMessage(null); }}
+            onClick={() => {
+              setTab('settings');
+              setStatusMessage(null);
+            }}
             className={`flex items-center gap-1.5 pb-2.5 px-3 text-xs font-semibold border-b-2 transition ${
               tab === 'settings'
                 ? 'border-indigo-500 text-indigo-400'
@@ -180,66 +324,207 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
             }`}
           >
             <Settings className="w-3.5 h-3.5" />
-            <span>Preferences</span>
+            <span>Préférences</span>
           </button>
         </div>
 
         {/* Status Notification */}
         {statusMessage && (
           <div
-            className={`mb-4 p-3 rounded-xl text-xs flex items-center gap-2 ${
+            className={`mb-4 p-3 rounded-xl text-xs flex items-start gap-2 ${
               statusMessage.type === 'success'
                 ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
                 : 'bg-rose-500/10 border border-rose-500/30 text-rose-300'
             }`}
           >
             {statusMessage.type === 'success' ? (
-              <CheckCircle className="w-4 h-4 flex-shrink-0" />
+              <CheckCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
             ) : (
-              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
             )}
-            <span>{statusMessage.text}</span>
+            <span className="leading-relaxed">{statusMessage.text}</span>
           </div>
         )}
 
-        {/* TAB 1: Live Google Sheet Sync */}
+        {/* TAB 1: Private Google OAuth 2.0 Sync */}
         {tab === 'sheet' && (
           <div className="space-y-4 text-xs">
-            <div className="p-3 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-1.5 text-slate-300">
-              <span className="font-semibold text-white block">How live sync works:</span>
-              <p>
-                1. In your Google Sheet, click <strong>File</strong> → <strong>Share</strong> → <strong>Publish to web</strong>.
-              </p>
-              <p>
-                2. Choose <strong>Entire Document</strong> (or your expense tab) as <strong>Comma-separated values (.csv)</strong> and click <strong>Publish</strong>.
-              </p>
-              <p>
-                3. Paste the published link or your sheet URL below:
+            {/* Connection Status Bar */}
+            <div className="flex items-center justify-between p-3 rounded-xl bg-slate-800/70 border border-slate-700/70">
+              <div className="flex items-center gap-2.5">
+                <span
+                  className={`w-2.5 h-2.5 rounded-full ${
+                    isConnected ? 'bg-emerald-400 shadow-sm shadow-emerald-400' : 'bg-slate-500'
+                  }`}
+                />
+                <div>
+                  <span className="font-semibold text-white block">
+                    {isConnected ? 'Compte Google authentifié' : 'Non connecté à Google'}
+                  </span>
+                  <span className="text-[11px] text-slate-400">
+                    {settings.lastSyncedAt
+                      ? `Dernière synchro : ${new Date(settings.lastSyncedAt).toLocaleString('fr-CA')}`
+                      : 'Accès direct sécurisé via Google Sheets API v4'}
+                  </span>
+                </div>
+              </div>
+              {isConnected && (
+                <button
+                  onClick={handleDisconnectGoogle}
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-700/80 hover:bg-rose-500/20 text-slate-300 hover:text-rose-300 border border-slate-600/50 transition text-[11px]"
+                >
+                  <LogOut className="w-3 h-3" />
+                  <span>Déconnecter</span>
+                </button>
+              )}
+            </div>
+
+            {/* Step 1: OAuth Client ID */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="font-medium text-slate-300">
+                  1. Google OAuth Client ID
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowSetupGuide(!showSetupGuide)}
+                  className="inline-flex items-center gap-1 text-[11px] text-indigo-400 hover:text-indigo-300 font-medium"
+                >
+                  <HelpCircle className="w-3.5 h-3.5" />
+                  <span>Comment l'obtenir en 2 min ?</span>
+                  {showSetupGuide ? (
+                    <ChevronUp className="w-3 h-3" />
+                  ) : (
+                    <ChevronDown className="w-3 h-3" />
+                  )}
+                </button>
+              </div>
+              <input
+                type="text"
+                placeholder="1234567890-abcdefg.apps.googleusercontent.com"
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-mono"
+              />
+
+              {/* Collapsible Setup Guide */}
+              {showSetupGuide && (
+                <div className="mt-2 p-3.5 rounded-xl bg-indigo-950/40 border border-indigo-500/30 text-slate-300 space-y-2 text-[11px] leading-relaxed">
+                  <p className="font-semibold text-indigo-300">
+                    Configuration unique dans Google Cloud (100% gratuit & privé) :
+                  </p>
+                  <ol className="list-decimal list-inside space-y-1.5">
+                    <li>
+                      Allez sur{' '}
+                      <a
+                        href="https://console.cloud.google.com/apis/library/sheets.googleapis.com"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-indigo-400 underline hover:text-indigo-300"
+                      >
+                        Google Cloud Console (Google Sheets API)
+                      </a>{' '}
+                      et cliquez sur <strong>Activer (Enable)</strong>.
+                    </li>
+                    <li>
+                      Dans <strong>APIs & Services → OAuth consent screen</strong>, choisissez{' '}
+                      <em>External</em> (mode Test) et ajoutez votre adresse Gmail dans{' '}
+                      <strong>Test users</strong>.
+                    </li>
+                    <li>
+                      Dans <strong>Credentials → Create Credentials → OAuth client ID</strong> :
+                      <ul className="list-disc list-inside ml-4 mt-1 text-slate-400 space-y-0.5">
+                        <li>
+                          Type d'application : <strong className="text-slate-200">Application Web (Web application)</strong>
+                        </li>
+                        <li>
+                          <strong>Origines JavaScript autorisées</strong> : ajoutez{' '}
+                          <code className="px-1.5 py-0.5 rounded bg-slate-900 text-emerald-400 font-mono select-all">
+                            {currentOrigin}
+                          </code>
+                        </li>
+                      </ul>
+                    </li>
+                    <li>
+                      Copiez le <strong>Client ID</strong> généré (`...apps.googleusercontent.com`) et collez-le ci-dessus.
+                    </li>
+                  </ol>
+                </div>
+              )}
+            </div>
+
+            {/* Step 2: Private Google Sheet URL */}
+            <div>
+              <label className="block font-medium text-slate-300 mb-1">
+                2. URL (ou ID) de votre feuille Google Sheet privée
+              </label>
+              <input
+                type="url"
+                placeholder="https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit"
+                value={sheetUrl}
+                onChange={(e) => setSheetUrl(e.target.value)}
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              />
+              <p className="text-[11px] text-slate-500 mt-1">
+                Gardez votre feuille <strong>Restreinte (Privée)</strong> — aucune publication sur le Web n'est requise.
               </p>
             </div>
 
+            {/* Step 3: Sheet Tab / Feuille Name */}
             <div>
-              <label className="block font-medium text-slate-300 mb-1">
-                Google Sheet URL
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="url"
-                  placeholder="https://docs.google.com/spreadsheets/d/..."
-                  value={sheetUrl}
-                  onChange={(e) => setSheetUrl(e.target.value)}
-                  className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                />
+              <div className="flex items-center justify-between mb-1">
+                <label className="font-medium text-slate-300">
+                  3. Nom de l'onglet (Optionnel — prend le 1er onglet par défaut)
+                </label>
                 <button
-                  onClick={handleSyncFromSheetUrl}
-                  disabled={isLoading}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium rounded-xl transition flex items-center gap-1.5 flex-shrink-0"
+                  type="button"
+                  onClick={handleLoadTabs}
+                  disabled={isLoadingTabs}
+                  className="inline-flex items-center gap-1 text-[11px] text-emerald-400 hover:text-emerald-300 font-medium disabled:opacity-50"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-                  <span>{isLoading ? 'Syncing...' : 'Sync Now'}</span>
+                  <ListFilter className="w-3.5 h-3.5" />
+                  <span>{isLoadingTabs ? 'Chargement...' : 'Détecter les onglets'}</span>
                 </button>
               </div>
+
+              {availableTabs.length > 0 ? (
+                <select
+                  value={sheetTab}
+                  onChange={(e) => setSheetTab(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                >
+                  {availableTabs.map((tName) => (
+                    <option key={tName} value={tName}>
+                      {tName}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  placeholder="Ex: Transactions, Dépenses 2026 (laisser vide pour le 1er onglet)"
+                  value={sheetTab}
+                  onChange={(e) => setSheetTab(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                />
+              )}
             </div>
+
+            {/* Action Button: Google Sign-In & Sync */}
+            <button
+              onClick={handlePrivateGoogleSync}
+              disabled={isLoading}
+              className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold rounded-xl transition flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/25"
+            >
+              <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+              <span>
+                {isLoading
+                  ? 'Connexion & lecture de la feuille...'
+                  : isConnected
+                  ? 'Synchroniser maintenant depuis Google Sheets'
+                  : 'Se connecter avec Google & Synchroniser'}
+              </span>
+            </button>
           </div>
         )}
 
@@ -250,13 +535,13 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
             <div className="border-2 border-dashed border-slate-700 rounded-xl p-5 text-center hover:border-indigo-500 transition">
               <Upload className="w-8 h-8 text-slate-500 mx-auto mb-2" />
               <p className="font-medium text-slate-200 mb-1">
-                Upload Google Sheets CSV Export
+                Importer un fichier CSV Google Sheets
               </p>
               <p className="text-[11px] text-slate-400 mb-3">
-                In Google Sheets, go to File → Download → Comma Separated Values (.csv)
+                Dans Google Sheets : Fichier → Télécharger → Valeurs séparées par des virgules (.csv)
               </p>
               <label className="cursor-pointer inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition">
-                <span>Select .CSV File</span>
+                <span>Choisir un fichier .CSV</span>
                 <input
                   type="file"
                   accept=".csv,text/csv"
@@ -269,9 +554,9 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
             {/* Export Current Data */}
             <div className="flex items-center justify-between p-3 rounded-xl bg-slate-800/60 border border-slate-700/60">
               <div>
-                <span className="font-semibold text-white block">Download App Data</span>
+                <span className="font-semibold text-white block">Exporter les données</span>
                 <span className="text-slate-400 text-[11px]">
-                  Export all {transactions.length} transactions to CSV
+                  Télécharger les {transactions.length} transactions au format CSV
                 </span>
               </div>
               <button
@@ -279,7 +564,7 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
                 className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-white font-medium transition"
               >
                 <Download className="w-3.5 h-3.5" />
-                <span>Export CSV</span>
+                <span>Exporter CSV</span>
               </button>
             </div>
           </div>
@@ -290,7 +575,7 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
           <div className="space-y-4 text-xs">
             <div>
               <label className="block font-medium text-slate-300 mb-1">
-                Currency Symbol
+                Symbole de devise
               </label>
               <input
                 type="text"
@@ -303,7 +588,7 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block font-medium text-slate-300 mb-1">
-                  Partner 1 Name
+                  Nom du Partenaire 1
                 </label>
                 <input
                   type="text"
@@ -315,7 +600,7 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
 
               <div>
                 <label className="block font-medium text-slate-300 mb-1">
-                  Partner 2 Name
+                  Nom du Partenaire 2
                 </label>
                 <input
                   type="text"
@@ -330,7 +615,7 @@ export const ImportExportModal: React.FC<ImportExportModalProps> = ({
               onClick={handleSaveSettings}
               className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold transition"
             >
-              Save Preferences
+              Enregistrer les préférences
             </button>
           </div>
         )}

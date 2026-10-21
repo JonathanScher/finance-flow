@@ -91,6 +91,35 @@ export function parseGoogleSheetCSV(csvText: string): CSVParseResult {
   return { transactions, errors };
 }
 
+/**
+ * Converts a 2D array of values from Google Sheets API v4 (spreadsheets.values.get)
+ * into Transactions, automatically finding the header row even if there are title rows above it.
+ */
+export function parseGoogleSheetValues(values: string[][]): CSVParseResult {
+  if (!values || values.length < 2) {
+    return { transactions: [], errors: ['La feuille semble vide ou ne contient aucune ligne de données.'] };
+  }
+
+  // Find the header row (first row containing at least 2 recognizable column names)
+  let headerRowIndex = 0;
+  for (let i = 0; i < Math.min(values.length, 15); i++) {
+    const row = values[i].map((cell) => (cell || '').toString().trim());
+    const matches = row.filter((col) =>
+      /^(owner|who|person|payer|account|bank|card|date|timestamp|day|description|desc|item|merchant|payee|credit|income|inflow|deposit|debit|expense|outflow|spent|amount|master\s*category|master_cat|category|sub\s*category|sub_cat|subcategory)/i.test(
+        col
+      )
+    );
+    if (matches.length >= 2) {
+      headerRowIndex = i;
+      break;
+    }
+  }
+
+  const relevantRows = values.slice(headerRowIndex);
+  const csvString = Papa.unparse(relevantRows);
+  return parseGoogleSheetCSV(csvString);
+}
+
 export function exportTransactionsToCSV(transactions: Transaction[]): string {
   const exportData = transactions.map((t) => ({
     Owner: t.owner,
