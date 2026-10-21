@@ -19,7 +19,7 @@ export const SAMPLE_TRANSACTIONS: Transaction[] = [
   },
   {
     id: 'tx-2',
-    date: '2026-10-01',
+    date: '2026-10-08',
     description: 'Employer Bi-Weekly Payroll Deposit',
     owner: 'Wife',
     account: 'RBC Chequing',

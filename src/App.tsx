@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Header } from './components/Header';
+import { SafeToSpendBar } from './components/SafeToSpendBar';
 import { SummaryCards } from './components/SummaryCards';
 import { ChartsView } from './components/ChartsView';
 import { BudgetProgress } from './components/BudgetProgress';
@@ -241,6 +242,15 @@ export function App() {
             </button>
           </div>
         )}
+
+        {/* 0. Safe-to-Spend & Monthly Runway Bar (Hero Decision Component) */}
+        <SafeToSpendBar
+          transactions={filteredTransactions}
+          allTransactions={transactions}
+          budgets={budgets}
+          settings={settings}
+          selectedMonth={selectedMonth}
+        />
 
         {/* 1. Summary KPI Cards (Income, Outflow, Net Cashflow, Owner Split) */}
         <SummaryCards
